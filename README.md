@@ -15,7 +15,7 @@ and transition mapping.
 
 The complete Quarto book is available at:
 
-[GitHub Pages URL will be added after publication]
+[Global Climate Classification Change Analysis](https://rkforest.github.io/global-climate-classification-change-analysis/)
 
 ## Analysis
 
