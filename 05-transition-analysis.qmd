@@ -1,0 +1,1033 @@
+---
+title: "Transition Analysis"
+author: "Rick Forest"
+date: today
+
+execute:
+  echo: true
+  warning: false
+  message: false
+
+format:
+  html:
+    toc: true
+    number-sections: false
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+---
+
+**Objective:** Analyze changes in Köppen–Trewartha climate classifications among the REF, CSN, and RCI climate intervals. This notebook quantifies how much global land area changes climate group or type, identifies the most important transitions, summarizes net gains and losses by classification, and saves a unified transition dataset for geographic mapping in the final stage of the workflow.
+
+## Transition Comparisons
+
+Three pairwise comparisons are used to separate historical, recent, and long-term classification change:
+
+- **REF → CSN** — change from the 1961–1990 WMO Climatological Reference Period to the 1991–2020 WMO Climatological Standard Normals.
+- **CSN → RCI** — change from the 1991–2020 standard normal to the 2021–2025 Recent Climate Interval.
+- **REF → RCI** — the full contrast between the reference period and the recent interval.
+
+Transition calculations use land-area weighting based on the ERA5 grid-cell area multiplied by the fractional land-sea mask.
+
+## Initialization
+
+```{r}
+#| label: Libraries
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(gt)
+  library(arrow)
+  library(fs)
+})
+```
+
+```{r}
+#| label: Directories
+
+dir_derived <- path("data", "derived")
+
+classification_path <- path(
+  dir_derived,
+  "climate_classification.parquet"
+)
+
+transitions_path <- path(
+  dir_derived,
+  "climate_transitions.parquet"
+)
+```
+
+```{r}
+#| label: Control
+
+# Recalculate the transition dataset from climate_classification.parquet.
+#
+# Set to TRUE after the classification dataset has changed or when the
+# transition dataset needs to be rebuilt. After a successful calculation,
+# FALSE can be used for fast previewing and rendering.
+run_transition_analysis <- FALSE
+```
+
+## Climate Periods
+
+```{r}
+#| label: climate-periods
+
+source("R/climate-periods.R")
+
+climate_periods |>
+  transmute(
+    `Period` = period_name,
+    `Short Label` = period_label,
+    `Abbreviation` = period_abbr,
+    `Years` = sprintf("%d–%d", start_year, end_year)
+  ) |>
+  gt()
+
+transition_comparisons <- tribble(
+  ~comparison_id, ~comparison_label, ~from_period_id, ~to_period_id,
+  "ref_csn", "REF → CSN", "reference_period", "standard_normal",
+  "csn_rci", "CSN → RCI", "standard_normal", "recent_interval",
+  "ref_rci", "REF → RCI", "reference_period", "recent_interval"
+)
+
+comparison_levels <- transition_comparisons$comparison_label
+
+period_palette <- setNames(
+  viridisLite::viridis(
+    nrow(climate_periods),
+    option = "D",
+    begin = 0.25,
+    end = 0.80
+  ),
+  climate_periods$period_abbr
+)
+
+```
+
+## Classification Reference
+
+```{r}
+#| label: classification-reference
+
+ktc_codes_path <- path(
+  "data",
+  "reference",
+  "ktc_type_codes.csv"
+)
+
+if (!file_exists(ktc_codes_path)) {
+  stop(
+    "Missing data/reference/ktc_type_codes.csv. ",
+    "Run 01-data-acquisition.qmd first."
+  )
+}
+
+ktc_codes <- read_csv(
+  ktc_codes_path,
+  show_col_types = FALSE
+)
+
+ktc_levels <- ktc_codes$ktc
+
+group_levels <- c(
+  "A",
+  "B",
+  "C",
+  "D",
+  "E",
+  "F"
+)
+```
+
+## Functions
+
+```{r}
+#| label: functions
+
+# creates the three grid-cell transition datasets
+fn_build_transition <- function(
+  classification_df,
+  comparison_row
+) {
+  from_id <- comparison_row$from_period_id[[1]]
+  to_id <- comparison_row$to_period_id[[1]]
+
+  from_df <- classification_df |>
+    filter(period_id == from_id) |>
+    transmute(
+      lon,
+      lat,
+      area,
+      lsm,
+      from_grp = as.character(grp),
+      from_ktc = as.character(ktc)
+    )
+
+  to_df <- classification_df |>
+    filter(period_id == to_id) |>
+    transmute(
+      lon,
+      lat,
+      to_area = area,
+      to_lsm = lsm,
+      to_grp = as.character(grp),
+      to_ktc = as.character(ktc)
+    )
+
+  transition_df <- from_df |>
+    inner_join(
+      to_df,
+      by = c("lon", "lat")
+    )
+
+  if (
+    any(
+      abs(transition_df$area - transition_df$to_area) > 1e-8,
+      na.rm = TRUE
+    ) ||
+      any(
+        abs(transition_df$lsm - transition_df$to_lsm) > 1e-8,
+        na.rm = TRUE
+      )
+  ) {
+    stop(
+      "Grid-cell area or land-sea mask differs between ",
+      comparison_row$comparison_label[[1]],
+      " classification datasets."
+    )
+  }
+
+  transition_df |>
+    transmute(
+      comparison_id = comparison_row$comparison_id[[1]],
+      comparison_label = comparison_row$comparison_label[[1]],
+      from_period_id = from_id,
+      to_period_id = to_id,
+      lon,
+      lat,
+      area,
+      lsm,
+      land_area = area * lsm,
+      from_grp,
+      to_grp,
+      from_ktc,
+      to_ktc,
+      group_changed = from_grp != to_grp,
+      type_changed = from_ktc != to_ktc
+    ) |>
+    filter(
+      lsm > 0,
+      is.finite(land_area),
+      land_area > 0,
+      !is.na(from_grp),
+      !is.na(to_grp),
+      !is.na(from_ktc),
+      !is.na(to_ktc)
+    )
+}
+
+# overall classification change summary
+fn_change_overview <- function(transitions_df) {
+  transitions_df |>
+    group_by(
+      comparison_id,
+      comparison_label
+    ) |>
+    summarise(
+      total_land_area = sum(land_area, na.rm = TRUE),
+      group_changed_area = sum(
+        land_area[group_changed],
+        na.rm = TRUE
+      ),
+      type_changed_area = sum(
+        land_area[type_changed],
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    ) |>
+    mutate(
+      group_changed_pct = group_changed_area / total_land_area,
+      type_changed_pct = type_changed_area / total_land_area,
+      comparison_label = factor(
+        comparison_label,
+        levels = comparison_levels
+      )
+    ) |>
+    arrange(comparison_label)
+}
+
+# group/type transition summaries
+fn_transition_summary <- function(
+  transitions_df,
+  from_variable,
+  to_variable
+) {
+  transitions_df |>
+    transmute(
+      comparison_id,
+      comparison_label,
+      from_class = .data[[from_variable]],
+      to_class = .data[[to_variable]],
+      land_area
+    ) |>
+    group_by(
+      comparison_id,
+      comparison_label,
+      from_class,
+      to_class
+    ) |>
+    summarise(
+      mkm = sum(land_area, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    group_by(
+      comparison_id,
+      comparison_label
+    ) |>
+    mutate(
+      pct = mkm / sum(mkm)
+    ) |>
+    ungroup() |>
+    mutate(
+      changed = from_class != to_class,
+      comparison_label = factor(
+        comparison_label,
+        levels = comparison_levels
+      )
+    ) |>
+    arrange(
+      comparison_label,
+      desc(mkm)
+    )
+}
+
+# group/type gains, losses, and net change
+fn_net_change <- function(
+  transition_summary,
+  class_levels
+) {
+  from_summary <- transition_summary |>
+    group_by(
+      comparison_id,
+      comparison_label,
+      class = from_class
+    ) |>
+    summarise(
+      from_mkm = sum(mkm),
+      .groups = "drop"
+    )
+
+  to_summary <- transition_summary |>
+    group_by(
+      comparison_id,
+      comparison_label,
+      class = to_class
+    ) |>
+    summarise(
+      to_mkm = sum(mkm),
+      .groups = "drop"
+    )
+
+  gains <- transition_summary |>
+    filter(changed) |>
+    group_by(
+      comparison_id,
+      comparison_label,
+      class = to_class
+    ) |>
+    summarise(
+      gain_mkm = sum(mkm),
+      .groups = "drop"
+    )
+
+  losses <- transition_summary |>
+    filter(changed) |>
+    group_by(
+      comparison_id,
+      comparison_label,
+      class = from_class
+    ) |>
+    summarise(
+      loss_mkm = sum(mkm),
+      .groups = "drop"
+    )
+
+  full_join(
+    from_summary,
+    to_summary,
+    by = c(
+      "comparison_id",
+      "comparison_label",
+      "class"
+    )
+  ) |>
+    full_join(
+      gains,
+      by = c(
+        "comparison_id",
+        "comparison_label",
+        "class"
+      )
+    ) |>
+    full_join(
+      losses,
+      by = c(
+        "comparison_id",
+        "comparison_label",
+        "class"
+      )
+    ) |>
+    complete(
+      nesting(
+        comparison_id,
+        comparison_label
+      ),
+      class = class_levels
+    ) |>
+    mutate(
+      across(
+        c(
+          from_mkm,
+          to_mkm,
+          gain_mkm,
+          loss_mkm
+        ),
+        ~ replace_na(.x, 0)
+      ),
+      total_land_area = sum(from_mkm, na.rm = TRUE),
+      from_pct = from_mkm / total_land_area,
+      to_pct = to_mkm / total_land_area,
+      gain_pct = gain_mkm / total_land_area,
+      loss_pct = loss_mkm / total_land_area,
+      net_pct = (to_mkm - from_mkm) / total_land_area,
+      comparison_label = factor(
+        comparison_label,
+        levels = comparison_levels
+      ),
+      class = factor(
+        class,
+        levels = class_levels
+      ),
+      .by = c(
+        comparison_id,
+        comparison_label
+      )
+    ) |>
+    arrange(
+      comparison_label,
+      class
+    )
+}
+
+# build a transition matrices
+fn_build_transition_matrix_gt <- function(
+  transition_summary,
+  comparison,
+  class_levels,
+  title,
+  hide_diagonal = TRUE
+) {
+  matrix_df <- transition_summary |>
+    filter(
+      comparison_label ==
+        comparison
+    ) |>
+    select(
+      from_class,
+      to_class,
+      pct
+    ) |>
+    complete(
+      from_class = class_levels,
+      to_class = class_levels,
+      fill = list(
+        pct = 0
+      )
+    ) |>
+    mutate(
+      from_class = factor(
+        from_class,
+        levels = class_levels
+      ),
+      to_class = factor(
+        to_class,
+        levels = class_levels
+      ),
+      pct = if_else(
+        hide_diagonal &
+          as.character(from_class) ==
+            as.character(to_class),
+        NA_real_,
+        pct
+      )
+    ) |>
+    arrange(
+      from_class,
+      to_class
+    ) |>
+    pivot_wider(
+      names_from = to_class,
+      values_from = pct
+    )
+
+  matrix_df |>
+    gt(
+      rowname_col = "from_class"
+    ) |>
+    tab_header(
+      title = title,
+      subtitle = paste(
+        comparison,
+        "— percent of global land area"
+      )
+    ) |>
+    tab_stubhead(
+      label = "From"
+    ) |>
+    tab_spanner(
+      label = "To",
+      columns = all_of(
+        class_levels
+      )
+    ) |>
+    fmt_percent(
+      columns = all_of(
+        class_levels
+      ),
+      decimals = 2
+    ) |>
+    sub_missing(
+      columns = all_of(
+        class_levels
+      ),
+      missing_text = "—"
+    )
+}
+
+# Largest Climate Type Transitions
+fn_largest_transitions_gt <- function(
+  transition_summary,
+  title,
+  n = 12
+) {
+  transition_summary |>
+    filter(changed) |>
+    group_by(
+      comparison_id,
+      comparison_label
+    ) |>
+    slice_max(
+      order_by = mkm,
+      n = n,
+      with_ties = FALSE
+    ) |>
+    ungroup() |>
+    mutate(
+      transition = paste(
+        from_class,
+        "→",
+        to_class
+      )
+    ) |>
+    select(
+      comparison_label,
+      transition,
+      mkm,
+      pct
+    ) |>
+    arrange(
+      comparison_label,
+      desc(mkm)
+    ) |>
+    gt(groupname_col = "comparison_label") |>
+    tab_header(
+      title = title,
+      subtitle = "Largest changed classifications by land area"
+    ) |>
+    cols_label(
+      transition = "Transition",
+      mkm = "Area (Mkm²)",
+      pct = "Land Area %"
+    ) |>
+    fmt_number(
+      columns = mkm,
+      decimals = 2
+    ) |>
+    fmt_percent(
+      columns = pct,
+      decimals = 2
+    )
+}
+
+# 
+fn_build_net_change_plot <- function(
+  net_change_df,
+  title,
+  x_label
+) {
+  plot_df <- net_change_df |>
+    left_join(
+      transition_comparisons |>
+        select(
+          comparison_id,
+          from_period_id,
+          to_period_id
+        ),
+      by = "comparison_id"
+    ) |>
+    left_join(
+      climate_periods |>
+        select(
+          period_id,
+          from_abbr = period_abbr
+        ),
+      by = c(
+        "from_period_id" = "period_id"
+      )
+    ) |>
+    left_join(
+      climate_periods |>
+        select(
+          period_id,
+          to_abbr = period_abbr
+        ),
+      by = c(
+        "to_period_id" = "period_id"
+      )
+    ) |>
+    mutate(
+      bar_period = if_else(
+        net_pct >= 0,
+        to_abbr,
+        from_abbr
+      ),
+      bar_period = factor(
+        bar_period,
+        levels = climate_periods$period_abbr
+      )
+    )
+
+  ggplot(
+    plot_df,
+    aes(
+      x = class,
+      y = net_pct,
+      fill = bar_period
+    )
+  ) +
+    geom_col() +
+    geom_hline(
+      yintercept = 0,
+      linewidth = 0.4
+    ) +
+    facet_wrap(
+      vars(comparison_label),
+      ncol = 1
+    ) +
+    scale_y_continuous(
+      labels = scales::percent_format(
+        accuracy = 0.1
+      )
+    ) +
+    scale_fill_manual(
+      values = period_palette,
+      breaks = climate_periods$period_abbr,
+      drop = FALSE
+    ) +
+    labs(
+      title = title,
+      x = x_label,
+      y = "Global Land Area %",
+      fill = "Climate Interval"
+    ) +
+    theme_minimal(
+      base_size = 12
+    ) +
+    theme(
+      legend.position = "bottom",
+      panel.grid.major.x = element_blank()
+    )
+}
+
+fn_build_net_change_gt <- function(
+  net_change_df,
+  title,
+  stub_header
+) {
+  display_df <- net_change_df |>
+    transmute(
+      class = as.character(class),
+      comparison_id,
+      gain_pct,
+      loss_pct,
+      net_pct
+    ) |>
+    pivot_wider(
+      names_from = comparison_id,
+      values_from = c(
+        gain_pct,
+        loss_pct,
+        net_pct
+      ),
+      names_glue = "{comparison_id}_{.value}"
+    )
+
+  display_df |>
+    gt(
+      rowname_col = "class"
+    ) |>
+    tab_header(
+      title = title,
+      subtitle = "Percentage of global land area"
+    ) |>
+    tab_stubhead(
+      label = stub_header
+    ) |>
+
+    tab_spanner(
+      label = "REF → CSN",
+      columns = c(
+        ref_csn_gain_pct,
+        ref_csn_loss_pct,
+        ref_csn_net_pct
+      )
+    ) |>
+    tab_spanner(
+      label = "CSN → RCI",
+      columns = c(
+        csn_rci_gain_pct,
+        csn_rci_loss_pct,
+        csn_rci_net_pct
+      )
+    ) |>
+    tab_spanner(
+      label = "REF → RCI",
+      columns = c(
+        ref_rci_gain_pct,
+        ref_rci_loss_pct,
+        ref_rci_net_pct
+      )
+    ) |>
+
+    cols_label(
+      ref_csn_gain_pct = "Gain",
+      ref_csn_loss_pct = "Loss",
+      ref_csn_net_pct = "Net",
+      csn_rci_gain_pct = "Gain",
+      csn_rci_loss_pct = "Loss",
+      csn_rci_net_pct = "Net",
+      ref_rci_gain_pct = "Gain",
+      ref_rci_loss_pct = "Loss",
+      ref_rci_net_pct = "Net"
+    ) |>
+
+    fmt_percent(
+      columns = ends_with("_pct"),
+      decimals = 2
+    ) |>
+
+    cols_align(
+      align = "right",
+      columns = ends_with("_pct")
+    )
+}
+
+```
+
+## Main Process
+
+```{r}
+#| label: main-process
+#| results: hide
+
+if (run_transition_analysis) {
+  if (!file_exists(classification_path)) {
+    stop(
+      "The classification dataset does not exist. ",
+      "Run 04-climate-classification.qmd first."
+    )
+  }
+
+  classification_results <- read_parquet(
+    classification_path
+  )
+
+  transition_results <- bind_rows(
+    lapply(
+      seq_len(nrow(transition_comparisons)),
+      function(i) {
+        fn_build_transition(
+          classification_results,
+          transition_comparisons[i, ]
+        )
+      }
+    )
+  )
+
+  write_parquet(
+    transition_results,
+    transitions_path
+  )
+} else {
+  if (!file_exists(transitions_path)) {
+    stop(
+      "The transition dataset does not exist. ",
+      "Set run_transition_analysis <- TRUE and run the notebook once."
+    )
+  }
+
+  transition_results <- read_parquet(
+    transitions_path
+  )
+}
+
+change_overview <- fn_change_overview(
+  transition_results
+)
+
+group_transitions <- fn_transition_summary(
+  transition_results,
+  "from_grp",
+  "to_grp"
+)
+
+type_transitions <- fn_transition_summary(
+  transition_results,
+  "from_ktc",
+  "to_ktc"
+)
+
+group_net_change <- fn_net_change(
+  group_transitions,
+  group_levels
+)
+
+type_net_change <- fn_net_change(
+  type_transitions,
+  ktc_levels
+)
+```
+
+## Overall Classification Change
+
+This summary shows the percentage of global land area whose Köppen–Trewartha classification changes in each pairwise comparison. A type change may occur within the same broad climate group, so type-change percentages can exceed group-change percentages.
+
+```{r}
+#| label: change-overview-table
+#| echo: false
+
+change_overview |>
+  transmute(
+    `Comparison` = as.character(comparison_label),
+    `Group Change Area (Mkm²)` = group_changed_area,
+    `Group Change` = group_changed_pct,
+    `Type Change Area (Mkm²)` = type_changed_area,
+    `Type Change` = type_changed_pct
+  ) |>
+  gt() |>
+  tab_header(
+    title = "KTC Classification Change Summary"
+  ) |>
+  fmt_number(
+    columns = c(
+      `Group Change Area (Mkm²)`,
+      `Type Change Area (Mkm²)`
+    ),
+    decimals = 2
+  ) |>
+  fmt_percent(
+    columns = c(
+      `Group Change`,
+      `Type Change`
+    ),
+    decimals = 2
+  )
+```
+
+```{r}
+#| label: change-overview-plot
+#| fig-height: 4
+#| out-width: 100%
+
+change_overview |>
+  select(
+    comparison_label,
+    group_changed_pct,
+    type_changed_pct
+  ) |>
+  pivot_longer(
+    cols = c(
+      group_changed_pct,
+      type_changed_pct
+    ),
+    names_to = "classification_level",
+    values_to = "pct"
+  ) |>
+  mutate(
+    classification_level = recode(
+      classification_level,
+      group_changed_pct = "Climate Group",
+      type_changed_pct = "Climate Type"
+    )
+  ) |>
+  ggplot(
+    aes(
+      x = comparison_label,
+      y = pct,
+      fill = classification_level
+    )
+  ) +
+  geom_col(
+    position = position_dodge(width = 0.75),
+    width = 0.65
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1)
+  ) +
+  labs(
+    title = "Land Area with Changed KTC Classification",
+    x = NULL,
+    y = "Global Land Area %",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.x = element_blank()
+  )
+```
+
+## Climate Group Transitions
+
+The matrices show the share of global land area assigned to each origin and destination climate group. Diagonal cells represent unchanged group assignments; off-diagonal cells represent group transitions.
+
+```{r}
+#| label: group-transition-matrices
+#| echo: false
+
+fn_build_transition_matrix_gt(
+  group_transitions,
+  "REF → CSN",
+  group_levels,
+  "KTC Group Transition Matrix"
+)
+
+fn_build_transition_matrix_gt(
+  group_transitions,
+  "CSN → RCI",
+  group_levels,
+  "KTC Group Transition Matrix"
+)
+
+fn_build_transition_matrix_gt(
+  group_transitions,
+  "REF → RCI",
+  group_levels,
+  "KTC Group Transition Matrix"
+)
+```
+
+## Climate Type Transitions
+
+The matrices show transitions among the Köppen–Trewartha climate types. Diagonal cells are suppressed to emphasize land area that changed classification.
+
+```{r}
+#| label: type-transition-matrices
+#| echo: false
+
+fn_build_transition_matrix_gt(
+  type_transitions,
+  "REF → CSN",
+  ktc_levels,
+  "KTC Type Transition Matrix"
+)
+
+fn_build_transition_matrix_gt(
+  type_transitions,
+  "CSN → RCI",
+  ktc_levels,
+  "KTC Type Transition Matrix"
+)
+
+fn_build_transition_matrix_gt(
+  type_transitions,
+  "REF → RCI",
+  ktc_levels,
+  "KTC Type Transition Matrix"
+)
+```
+
+<!-- ## Largest Climate Type Transitions
+
+Rather than displaying a separate table for every KTC type, this table identifies the largest changed type-to-type transitions for each comparison. -->
+
+```{r}
+#| label: largest-type-transitions
+#| echo: false
+
+# fn_largest_transitions_gt(
+#   type_transitions,
+#   "Largest KTC Type Transitions",
+#   n = 12
+# )
+
+```
+
+## Net Group Change
+
+Net change is the difference between the destination and origin land area assigned to each climate group. Gains and losses summarize only land that changed classification.
+
+```{r}
+#| label: group-net-change-table
+#| echo: false
+
+fn_build_net_change_gt(
+  group_net_change,
+  "KTC Group Gains, Losses, and Net Change",
+  "Group"
+)
+
+```
+
+```{r}
+#| label: group-net-change-plot
+#| fig-height: 7
+#| out-width: 100%
+
+fn_build_net_change_plot(
+  group_net_change,
+  "Net Change in KTC Climate Groups",
+  "Climate Group"
+)
+
+```
+
+## Net Climate Type Change
+
+The final table summarizes gains, losses, and net change for all Köppen–Trewartha climate types. The transition-level detail saved by this notebook is used for geographic mapping in the final workflow stage.
+
+```{r}
+#| label: type-net-change-table
+#| echo: false
+
+fn_build_net_change_gt(
+  type_net_change,
+  "KTC Type Gains, Losses, and Net Change",
+  "Type"
+)
+
+```
+
+```{r}
+#| label: type-net-change-plot
+#| fig-height: 7
+#| out-width: 100%
+
+fn_build_net_change_plot(
+  type_net_change,
+  "Net Change in KTC Climate Types",
+  "Climate Type"
+)
+```

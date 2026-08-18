@@ -1,0 +1,38 @@
+project:
+  type: book
+  output-dir: "_output"  
+  resources: ".quarto/files"  
+
+book:
+  title: "Global Climate Classification Change Analysis"
+  author: "Rick Forest"
+  date: today
+
+  chapters:
+    - index.qmd
+    - 01-data-acquisition.qmd
+    - 02-data-transformation.qmd
+    - 03-determinant-calculation.qmd
+    - 04-climate-classification.qmd
+    - 05-transition-analysis.qmd
+    - 06-transition-mapping.qmd
+ 
+execute:
+  warning: false
+  message: false
+
+format:
+  html:
+    page-layout: full
+    toc: true
+    toc-location: right
+
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+
+    grid:
+      sidebar-width: 250px
+      body-width: 900px
+      margin-width: 150px
+      gutter-width: 1.5rem

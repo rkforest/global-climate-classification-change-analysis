@@ -1,0 +1,680 @@
+---
+title: "Climate Classification"
+author: "Rick Forest"
+date: today
+
+execute:
+  echo: true
+  warning: false
+  message: false
+
+format:
+  html:
+    toc: true
+    number-sections: false
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+---
+
+**Objective:** Assign Köppen–Trewartha climate classifications to each ERA5 grid cell for the REF, CSN, and RCI climate intervals. This notebook applies a common classification sequence to the determinant dataset created in the previous step, saves a unified classification dataset for transition analysis, and summarizes the geographic distribution of climate groups and types across the three intervals.
+
+## Classification Method
+
+The Köppen–Trewartha classification is assigned sequentially so that each grid cell receives exactly one climate group and type.
+
+1. **Group F — Polar:** classified from `TMAX`.
+2. **Group B — Dry:** classified from `ATHR` and `PTOT`.
+3. **Group A — Tropical:** classified from `TMIN` and `PL60`.
+4. **Group C — Subtropical:** classified from `TG10`, `PTOT`, `PWNT`, `PSMR`, and `PMIN`.
+5. **Group D — Temperate:** classified from `TG10` and `TMIN`.
+6. **Group E — Boreal:** classified from `TG10` and `TMIN`.
+
+The classification thresholds below are preserved from the original GCCCA workflow.
+
+## Initialization
+
+```{r}
+#| label: Libraries
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(sf)
+  library(gt)
+  library(arrow)
+  library(fs)
+  library(patchwork)
+})
+```
+
+```{r}
+#| label: Directories
+
+dir_reference <- path("data", "reference")
+dir_derived <- path("data", "derived")
+
+determinants_path <- path(
+  dir_derived,
+  "climate_determinants.parquet"
+)
+
+classification_path <- path(
+  dir_derived,
+  "climate_classification.parquet"
+)
+
+ktc_codes_path <- path(
+  dir_reference,
+  "ktc_type_codes.csv"
+)
+
+coastline_path <- path(
+  dir_reference,
+  "global-coastline.gpkg"
+)
+```
+
+```{r}
+#| label: Control
+
+# Recalculate the climate classifications from the determinant dataset.
+#
+# Set to TRUE after climate_determinants.parquet has changed or when the
+# classification dataset needs to be rebuilt. After a successful calculation,
+# FALSE can be used for fast previewing and rendering.
+run_climate_classification <- FALSE
+```
+
+## Climate Periods
+
+The analysis uses three non-overlapping climate intervals so that the same classification method can be compared consistently through time.
+
+```{r}
+#| label: climate-periods
+
+source("R/climate-periods.R")
+
+climate_periods |>
+  transmute(
+    `Period` = period_name,
+    `Short Label` = period_label,
+    `Abbreviation` = period_abbr,
+    `Years` = sprintf("%d–%d", start_year, end_year)
+  ) |>
+  gt()
+
+period_plot_labels <- setNames(
+  paste0(
+    climate_periods$period_abbr,
+    " (",
+    climate_periods$start_year,
+    "–",
+    climate_periods$end_year,
+    ")"
+  ),
+  climate_periods$period_abbr
+)
+
+period_palette <- setNames(
+  viridisLite::viridis(
+    nrow(climate_periods),
+    option = "D",
+    begin = 0.25,
+    end = 0.80
+  ),
+  climate_periods$period_abbr
+)
+```
+
+## Classification Reference
+
+```{r}
+#| label: classification-reference
+
+required_reference_files <- c(
+  ktc_codes_path,
+  coastline_path
+)
+
+if (!all(file_exists(required_reference_files))) {
+  stop(
+    "Missing classification reference files in data/reference. ",
+    "Expected ktc_type_codes.csv and global-coastline.gpkg."
+  )
+}
+
+df_ktc_codes <- read_csv(
+  ktc_codes_path,
+  show_col_types = FALSE
+)
+
+ktc_levels <- df_ktc_codes$ktc
+
+ktc_palette <- setNames(
+  df_ktc_codes$hex,
+  df_ktc_codes$ktc
+)
+
+group_levels <- c(
+  "A",
+  "B",
+  "C",
+  "D",
+  "E",
+  "F"
+)
+
+rbn_prj <- "ESRI:54030"
+
+sf_coastline <- st_read(
+  coastline_path,
+  quiet = TRUE
+)
+```
+
+## Functions
+
+```{r}
+#| label: functions
+
+fn_assign_ktc <- function(df) {
+  df |>
+    mutate(
+      grp = case_when(
+        TMAX < 10 ~ "F",
+        PTOT < (ATHR * 10) ~ "B",
+        TMIN >= 18 ~ "A",
+        TG10 >= 8 ~ "C",
+        TG10 >= 4 ~ "D",
+        TG10 >= 1 ~ "E",
+        TRUE ~ "X"
+      ),
+      typ = case_when(
+        grp == "A" & PL60 <= 2 ~ "r",
+        grp == "A" ~ "w",
+        grp == "B" & PTOT < (ATHR * 10) / 2 ~ "W",
+        grp == "B" ~ "S",
+        grp == "C" &
+          PWNT >= PSMR * 3 &
+          PMIN < 30 &
+          PTOT < 890 ~ "s",
+        grp == "C" &
+          PSMR >= PWNT * 10 ~ "w",
+        grp == "C" ~ "f",
+        grp == "D" &
+          TMIN > 0 ~ "o",
+        grp == "D" ~ "c",
+        grp == "E" &
+          TMIN > -10 ~ "o",
+        grp == "E" ~ "c",
+        grp == "F" &
+          TMAX > 0 ~ "t",
+        grp == "F" ~ "i",
+        TRUE ~ ""
+      ),
+      ktc = paste0(grp, typ),
+      grp = factor(
+        grp,
+        levels = group_levels
+      ),
+      ktc = factor(
+        ktc,
+        levels = ktc_levels
+      )
+    ) |>
+    select(
+      period_id,
+      period_name,
+      period_label,
+      period_abbr,
+      start_year,
+      end_year,
+      lon,
+      lat,
+      area,
+      lsm,
+      grp,
+      ktc
+    )
+}
+
+fn_class_summary <- function(
+  classification_df,
+  class_variable,
+  class_levels
+) {
+  classification_df |>
+    filter(lsm > 0) |>
+    transmute(
+      period_id,
+      period_name,
+      period_label,
+      period_abbr,
+      class = as.character(
+        .data[[class_variable]]
+      ),
+      land_area = area * lsm
+    ) |>
+    filter(
+      !is.na(class),
+      is.finite(land_area),
+      land_area > 0
+    ) |>
+    group_by(
+      period_id,
+      period_name,
+      period_label,
+      period_abbr,
+      class
+    ) |>
+    summarise(
+      mkm = sum(
+        land_area,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    ) |>
+    group_by(
+      period_id,
+      period_name,
+      period_label,
+      period_abbr
+    ) |>
+    mutate(
+      pct = mkm / sum(mkm)
+    ) |>
+    ungroup() |>
+    complete(
+      nesting(
+        period_id,
+        period_name,
+        period_label,
+        period_abbr
+      ),
+      class = class_levels,
+      fill = list(
+        mkm = 0,
+        pct = 0
+      )
+    ) |>
+    mutate(
+      class = factor(
+        class,
+        levels = class_levels
+      ),
+      period_abbr = factor(
+        period_abbr,
+        levels = climate_periods$period_abbr
+      )
+    ) |>
+    arrange(
+      class,
+      period_abbr
+    )
+}
+
+fn_build_summary_gt <- function(
+  summary_df,
+  title,
+  stub_header
+) {
+  display_df <- summary_df |>
+    mutate(
+      period_abbr = as.character(period_abbr),
+      class = as.character(class)
+    ) |>
+    select(
+      class,
+      period_abbr,
+      mkm,
+      pct
+    ) |>
+    pivot_wider(
+      names_from = period_abbr,
+      values_from = c(mkm, pct),
+      names_glue = "{.value}_{period_abbr}"
+    )
+
+  mkm_cols <- paste0(
+    "mkm_",
+    climate_periods$period_abbr
+  )
+
+  pct_cols <- paste0(
+    "pct_",
+    climate_periods$period_abbr
+  )
+
+  display_df |>
+    select(
+      class,
+      all_of(mkm_cols),
+      all_of(pct_cols)
+    ) |>
+    gt(
+      rowname_col = "class"
+    ) |>
+    tab_header(
+      title = title
+    ) |>
+    tab_stubhead(
+      label = stub_header
+    ) |>
+    tab_spanner(
+      label = "Area (Mkm²)",
+      columns = all_of(mkm_cols)
+    ) |>
+    tab_spanner(
+      label = "Earth's Land Surface",
+      columns = all_of(pct_cols)
+    ) |>
+    cols_label(
+      !!!setNames(
+        as.list(climate_periods$period_abbr),
+        mkm_cols
+      ),
+      !!!setNames(
+        as.list(climate_periods$period_abbr),
+        pct_cols
+      )
+    ) |>
+    cols_align(
+      align = "right",
+      columns = c(
+        all_of(mkm_cols),
+        all_of(pct_cols)
+      )
+    ) |>
+    fmt_number(
+      columns = all_of(mkm_cols),
+      decimals = 1
+    ) |>
+    fmt_percent(
+      columns = all_of(pct_cols),
+      decimals = 1
+    )
+}
+
+fn_build_bar_chart <- function(
+  summary_df,
+  title,
+  x_label,
+  y_max = 0.35
+) {
+  ggplot(
+    summary_df,
+    aes(
+      x = class,
+      y = pct,
+      fill = period_abbr
+    )
+  ) +
+    geom_col(
+      position = position_dodge(
+        width = 0.8
+      ),
+      width = 0.7
+    ) +
+    scale_y_continuous(
+      labels = scales::percent_format(
+        accuracy = 1
+      ),
+      limits = c(0, y_max)
+    ) +
+    scale_fill_manual(
+      values = period_palette,
+      breaks = climate_periods$period_abbr,
+      labels = period_plot_labels,
+      guide = guide_legend(
+        nrow = 1,
+        byrow = TRUE
+      )
+    ) +
+    labs(
+      title = title,
+      x = x_label,
+      y = "Land Area %",
+      fill = NULL
+    ) +
+    theme_minimal(
+      base_size = 12
+    ) +
+    theme(
+      legend.position = "bottom",
+      panel.grid.major.x = element_blank()
+    )
+}
+
+fn_build_global_map <- function(
+  classification_df,
+  period_id
+) {
+  period_row <- climate_periods |>
+    filter(
+      .data$period_id ==
+        .env$period_id
+    )
+
+  if (nrow(period_row) != 1) {
+    stop(
+      "Expected exactly one climate period for ",
+      period_id,
+      "."
+    )
+  }
+
+  map_df <- classification_df |>
+    filter(
+      .data$period_id ==
+        .env$period_id,
+      lsm > 0
+    ) |>
+    select(
+      lon,
+      lat,
+      ktc
+    )
+
+  sf_plot <- st_as_sf(
+    map_df,
+    coords = c(
+      "lon",
+      "lat"
+    ),
+    crs = 4326
+  )
+
+  ggplot() +
+    geom_sf(
+      data = sf_plot,
+      aes(
+        color = ktc
+      ),
+      size = 0.01
+    ) +
+    geom_sf(
+      data = sf_coastline,
+      inherit.aes = FALSE,
+      color = "black",
+      linewidth = 0.1
+    ) +
+    scale_color_manual(
+      values = ktc_palette,
+      drop = FALSE
+    ) +
+    coord_sf(
+      crs = rbn_prj,
+      datum = NA
+    ) +
+    labs(
+      title = "Köppen–Trewartha Climate Classification",
+      subtitle = paste0(
+        period_row$period_label,
+        " (",
+        period_row$start_year,
+        "–",
+        period_row$end_year,
+        ")"
+      ),
+      color = "Climate"
+    ) +
+    guides(
+      color = guide_legend(
+        override.aes = list(
+          size = 5
+        )
+      )
+    ) +
+    theme_void() +
+    theme(
+      plot.title = element_text(
+        face = "bold"
+      )
+    )
+}
+```
+
+## Main Process
+
+```{r}
+#| label: main-process
+#| results: hide
+
+if (run_climate_classification) {
+  if (!file_exists(determinants_path)) {
+    stop(
+      "The determinant dataset does not exist. ",
+      "Run 03-determinant-calculation.qmd first."
+    )
+  }
+
+  determinant_results <- read_parquet(
+    determinants_path
+  )
+
+  classification_results <- fn_assign_ktc(
+    determinant_results
+  )
+
+  write_parquet(
+    classification_results,
+    classification_path
+  )
+} else {
+  if (!file_exists(classification_path)) {
+    stop(
+      "The classification dataset does not exist. ",
+      "Set run_climate_classification <- TRUE and run the notebook once."
+    )
+  }
+
+  classification_results <- read_parquet(
+    classification_path
+  )
+}
+
+group_summary <- fn_class_summary(
+  classification_results,
+  "grp",
+  group_levels
+)
+
+type_summary <- fn_class_summary(
+  classification_results,
+  "ktc",
+  ktc_levels
+)
+```
+
+## Classification Summary
+
+The summary tables show the land area assigned to each Köppen–Trewartha climate group and type during the REF, CSN, and RCI climate intervals. Transition gains, losses, and net changes are calculated separately in the next stage of the workflow.
+
+```{r}
+#| label: group-summary-table
+#| echo: false
+
+fn_build_summary_gt(
+  group_summary,
+  "KTC Group Assignment Summary",
+  "Group"
+)
+```
+
+```{r}
+#| label: type-summary-table
+#| echo: false
+
+fn_build_summary_gt(
+  type_summary,
+  "KTC Type Assignment Summary",
+  "Type"
+)
+```
+
+## Classification Distribution
+
+The grouped bar charts compare the percentage of global land area assigned to each climate group and type across the three climate intervals.
+
+```{r}
+#| label: group-bar-chart
+#| fig-height: 4
+#| out-width: 100%
+
+fn_build_bar_chart(
+  group_summary,
+  "KTC Group Assignment Summary",
+  "Group"
+)
+```
+
+```{r}
+#| label: type-bar-chart
+#| fig-height: 4
+#| out-width: 100%
+
+fn_build_bar_chart(
+  type_summary,
+  "KTC Type Assignment Summary",
+  "Type"
+)
+```
+
+## Global Maps
+
+## Global Maps
+
+The maps show the geographic distribution of Köppen–Trewartha climate types for each climate interval using a common classification palette. The broad spatial patterns are intentionally similar because most grid cells retain the same climate classification across the three intervals. These maps provide a geographic check of the classification results; changes between intervals are examined directly in the transition-analysis stage.
+
+```{r}
+#| label: global-maps
+#| fig-width: 16
+#| fig-height: 18
+#| out-width: 100%
+#| column: screen-inset
+
+map_ref <- fn_build_global_map(
+  classification_results,
+  "reference_period"
+)
+
+map_csn <- fn_build_global_map(
+  classification_results,
+  "standard_normal"
+)
+
+map_rci <- fn_build_global_map(
+  classification_results,
+  "recent_interval"
+)
+
+map_ref /
+  map_csn /
+  map_rci +
+  plot_layout(
+    guides = "collect"
+  ) &
+  theme(
+    legend.position = "bottom"
+  )
+```

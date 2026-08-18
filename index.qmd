@@ -1,0 +1,109 @@
+# Introduction {.unnumbered}
+
+This project analyzes changes in global climate classification across three climate intervals, beginning with the 1961–1990 WMO Climatological Reference Period and extending through the 2021–2025 Recent Climate Interval, using ERA5 temperature and precipitation data from the Copernicus Climate Data Store.
+
+The analysis applies the Köppen–Trewartha climate classification system consistently to each interval, compares the resulting climate classifications, quantifies transitions among climate groups and types, and maps where those transitions occur.
+
+## Climate Periods
+
+The project uses three non-overlapping analysis periods and one consistent terminology throughout the workflow:
+
+- **WMO Climatological Reference Period (1961–1990)** — the 1961–1990 period retained by WMO as a standard reference period for long-term climate-change assessment.
+- **WMO Climatological Standard Normals (1991–2020)** — the current WMO 30-year climatological standard normal.
+- **Recent Climate Interval (2021–2025)** — a project-defined recent five-year interval used to identify emerging climate signals. It is not a WMO climatological normal.
+
+For compact tables or figures, the project uses the abbreviations **REF**, **CSN**, and **RCI**. These labels are intended to be used consistently in this project and in the companion Global Temperature Change Analysis project.
+
+## Köppen–Trewartha Climate Classification
+
+The Köppen–Trewartha climate classification used in this project contains six broad climate groups and thirteen climate types:
+
+- **Group A — Tropical**
+  - **Ar** — Tropical Rainforest
+  - **Aw** — Tropical Savanna
+- **Group B — Dry**
+  - **BW** — Desert (Arid)
+  - **BS** — Steppe (Semiarid)
+- **Group C — Subtropical**
+  - **Cs** — Mediterranean (dry summer)
+  - **Cw** — Subtropical (dry winter)
+  - **Cf** — Subtropical (no dry season)
+- **Group D — Temperate**
+  - **Do** — Temperate (Oceanic)
+  - **Dc** — Temperate (Continental)
+- **Group E — Boreal**
+  - **Eo** — Boreal (Oceanic)
+  - **Ec** — Boreal (Continental)
+- **Group F — Polar**
+  - **Ft** — Tundra
+  - **Fi** — Ice Cap
+
+## Workflow
+
+The analysis is organized as a reproducible workflow consisting of six stages:
+
+1. **Data Acquisition**  
+   Acquire ERA5 temperature, precipitation, and land-sea-mask data; create the static Köppen–Trewartha reference tables and coastline layer; and document the project software environment and acquired datasets.
+
+2. **Data Transformation**  
+   Convert the monthly ERA5 source data into reusable processing caches and twelve-month climatologies for temperature and precipitation for each climate interval.
+
+3. **Determinant Calculation**  
+   Calculate the temperature, precipitation, and aridity determinants required by the Köppen–Trewartha classification system.
+
+4. **Climate Classification**  
+   Apply the same Köppen–Trewartha classification rules to each grid cell for the REF, CSN, and RCI climate intervals and summarize the resulting climate groups and types.
+
+5. **Transition Analysis**  
+   Quantify climate-group and climate-type transitions for REF → CSN, CSN → RCI, and REF → RCI; examine transition matrices; and calculate gains, losses, and net classification changes.
+
+6. **Transition Mapping**  
+   Map the geographic distribution of climate-classification changes, including broad spatial patterns, expansion of dry and desert classifications, retreat of polar classifications, and the long-term REF → RCI transition pattern.
+
+## Data
+
+Climate data are obtained from the **ERA5 reanalysis** produced by the European Centre for Medium-Range Weather Forecasts and distributed through the Copernicus Climate Data Store.
+
+The source data used in this analysis include:
+
+- Monthly 2 m air temperature
+- Monthly total precipitation
+- ERA5 land-sea mask
+
+Static project reference data include:
+
+- Köppen–Trewartha climate-group definitions and colors
+- Köppen–Trewartha climate-type definitions and colors
+- Natural Earth global coastline data
+
+## Software
+
+Programming Language: **R**  
+Development Environment: **Positron**  
+Document Creation: **Quarto**
+
+R Packages:
+
+- **arrow** – Parquet data import and export
+- **ecmwfr** – ERA5 acquisition from the Copernicus Climate Data Store
+- **fs** – file and directory operations
+- **gt** – summary tables
+- **patchwork** – plot layouts
+- **rnaturalearth** – Natural Earth geographic data
+- **sf** – spatial data processing and mapping
+- **terra** – raster processing and climatological aggregation
+- **tidyverse** – data manipulation and visualization
+- **viridisLite** – climate-period color palettes
+
+Exact software and package versions used for the project are documented in the Data Acquisition chapter.
+
+## References
+
+World Meteorological Organization climatological reference periods:  
+<https://www.ncei.noaa.gov/products/wmo-climate-normals>
+
+Copernicus Climate Data Store / ERA5:  
+<https://cds.climate.copernicus.eu/>
+
+Natural Earth:  
+<https://www.naturalearthdata.com/>
