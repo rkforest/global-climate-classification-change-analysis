@@ -555,3 +555,22 @@ fn_build_long_term_group_map(
   transition_results
 )
 ```
+
+```{r}
+#| label: export-github-image
+#| echo: false
+social_preview_map <- fn_build_long_term_group_map(
+  transition_results
+)
+
+ggsave(
+  "social-preview-map.png",
+  plot = social_preview_map,
+  width = 16,
+  height = 9,
+  units = "in",
+  dpi = 200,
+  bg = "white"
+)
+
+```
