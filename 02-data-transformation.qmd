@@ -522,15 +522,14 @@ cache_log |>
 ```{r}
 #| label: transformation-summary
 #| echo: false
+#| column: screen-inset
 
 log_df |>
   transmute(
     `Period` = period_abbr,
-    `Period Name` = period_name,
     `Years` = period,
     `Output File` = output_file,
     `Source File` = source_file,
-    `Cache File` = cache_file,
     `ERA5 Variable` = variable_name,
     `Latitudes` = latitude_count,
     `Longitudes` = longitude_count,
@@ -545,13 +544,28 @@ log_df |>
     title = "Transformation Summary"
   ) |>
   fmt_number(
-    columns = c(`Input Values`, `Output Values`),
+    columns = c(
+      `Input Values`,
+      `Output Values`
+    ),
     decimals = 0,
     use_seps = TRUE
   ) |>
   fmt_number(
     columns = `Elapsed Seconds`,
     decimals = 1
+  ) |>
+  cols_align(
+    align = "center",
+    columns = c(
+      `Period`,
+      `Years`,
+      `ERA5 Variable`,
+      `Latitudes`,
+      `Longitudes`,
+      `Input Months`,
+      `Output Months`
+    )
   )
-
+    
 ```

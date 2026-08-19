@@ -29,6 +29,7 @@ suppressPackageStartupMessages({
   library(gt)
   library(fs)
   library(ecmwfr)
+  library(sf)
 })
 
 ```

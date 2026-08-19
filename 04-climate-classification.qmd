@@ -642,8 +642,6 @@ fn_build_bar_chart(
 
 ## Global Maps
 
-## Global Maps
-
 The maps show the geographic distribution of Köppen–Trewartha climate types for each climate interval using a common classification palette. The broad spatial patterns are intentionally similar because most grid cells retain the same climate classification across the three intervals. These maps provide a geographic check of the classification results; changes between intervals are examined directly in the transition-analysis stage.
 
 ```{r}

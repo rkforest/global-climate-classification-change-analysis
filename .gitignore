@@ -28,3 +28,4 @@ data/
 
 # Temporary figures
 _figures/
+/.quarto/
