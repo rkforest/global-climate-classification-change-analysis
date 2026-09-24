@@ -29,3 +29,5 @@ data/
 # Temporary figures
 _figures/
 /.quarto/
+
+**/*.quarto_ipynb
